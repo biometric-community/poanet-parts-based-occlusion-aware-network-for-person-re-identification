@@ -1,0 +1,43 @@
+paper:
+  slug: poanet-parts-based-occlusion-aware-network-for-person-re-identification
+  title: "POANET: Parts-Based Occlusion Aware Network for Person Re-Identification"
+  doi: "10.1109/TBIOM.2025.3641048"
+device: cuda
+data:
+  root: ../../datasets/market1501
+  height: 384
+  width: 128
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  random_erasing: true
+  num_workers: 4
+model:
+  backbone: resnet50
+  feat_dim: 256
+  pretrained: true
+train:
+  epochs: 100
+  phase1_epochs: 0
+  odn_from_start: true
+  batch_size: 64
+  num_instances: 4
+  lr: 0.0002
+  lr_drops: [90, 95]
+  lr_factors: [0.1, 0.01]
+  momentum: 0.9
+  weight_decay: 0.0005
+  margin: 0.3
+  lambda_tri: 1.0
+  lambda_occ: 0.5
+  synthetic_occlusion: true
+  label_smoothing: 0.0
+  seed: 42
+eval:
+  batch_size: 64
+  ranks: [1, 5, 10]
+  every: 20
+paths:
+  checkpoint_dir: outputs/checkpoints
+  log_dir: outputs/logs
+  pred_dir: outputs/predictions
+  figure_dir: outputs/figures
