@@ -225,13 +225,13 @@ def main(argv=None):
                 f"R1={metrics['Rank-1']:.2f} R5={metrics.get('Rank-5', 0):.2f}",
                 flush=True,
             )
-            if metrics["mAP"] > best["mAP"]:
-                best = {k: metrics[k] for k in metrics if k != "cmc"}
-                best["epoch"] = epoch + 1
-                torch.save(
-                    {"model": model.state_dict(), "epoch": epoch + 1, "best": best, "cfg": cfg},
-                    ckpt_dir / "best.pt",
-                )
+            # No validation split: keep the latest checkpoint, not the best on the test set
+            best = {k: metrics[k] for k in metrics if k != "cmc"}
+            best["epoch"] = epoch + 1
+            torch.save(
+                {"model": model.state_dict(), "epoch": epoch + 1, "best": best, "cfg": cfg},
+                ckpt_dir / "best.pt",
+            )
 
         history.append(row)
         print(
