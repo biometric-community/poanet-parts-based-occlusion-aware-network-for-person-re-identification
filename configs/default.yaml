@@ -19,8 +19,8 @@ train:
   epochs: 100
   phase1_epochs: 0
   odn_from_start: true
-  batch_size: 64
-  num_instances: 4
+  batch_size: 128
+  num_instances: 8
   lr: 0.0002
   lr_drops: [90, 95]
   lr_factors: [0.1, 0.01]
@@ -28,8 +28,11 @@ train:
   weight_decay: 0.0005
   margin: 0.3
   lambda_tri: 1.0
-  lambda_occ: 0.5
-  synthetic_occlusion: true
+  odn_pretrain:
+    epochs: 10
+    batch_size: 32
+    lr: 0.0001
+    weight_decay: 0.0005
   label_smoothing: 0.0
   seed: 42
 eval:

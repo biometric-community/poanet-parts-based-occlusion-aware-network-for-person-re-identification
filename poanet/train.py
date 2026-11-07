@@ -20,9 +20,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from poanet.data import Market1501, RandomIdentitySampler, build_transforms, resolve_market_root
-from poanet.losses import BatchHardTriplet, poanet_loss
+from poanet.losses import BatchHardTriplet, occlusion_extent_loss, poanet_loss
 from poanet.metrics import evaluate_rank
-from poanet.models.poanet import build_poanet, synthetic_occlusion_batch
+from poanet.models.poanet import build_poanet, stripe_extents, synthetic_occlusion_batch
 
 
 def load_config(path: str | Path) -> dict:
@@ -87,6 +87,45 @@ def lr_at(epoch: int, cfg: dict) -> float:
     return lr
 
 
+def pretrain_odn(model, train_ds, cfg: dict, device: torch.device) -> None:
+    """Sec. IV-B: train the ODN on its own with Eq. (5), then keep it fixed."""
+    ocfg = cfg["train"].get("odn_pretrain", {})
+    loader = DataLoader(
+        train_ds,
+        batch_size=int(ocfg.get("batch_size", 32)),
+        shuffle=True,
+        num_workers=int(cfg["data"].get("num_workers", 4)),
+        pin_memory=True,
+        drop_last=True,
+    )
+    opt = torch.optim.Adam(
+        model.odn.parameters(),
+        lr=float(ocfg.get("lr", 1e-4)),
+        weight_decay=float(ocfg.get("weight_decay", 5e-4)),
+    )
+    max_steps = ocfg.get("max_steps")
+    step = 0
+    model.odn.train()
+    for epoch in range(int(ocfg.get("epochs", 10))):
+        running, n = 0.0, 0
+        for batch_data in loader:
+            x = batch_data["image"].to(device, non_blocking=True)
+            occluded, mask = synthetic_occlusion_batch(x)
+            loss = occlusion_extent_loss(model.odn(occluded), stripe_extents(mask))
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+            running += float(loss.detach())
+            n += 1
+            step += 1
+            if max_steps is not None and step >= int(max_steps):
+                break
+        print(f"[odn] epoch={epoch+1} mae={running / max(n, 1):.4f}", flush=True)
+        if max_steps is not None and step >= int(max_steps):
+            break
+    model.freeze_odn()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Train POANET")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
@@ -133,8 +172,9 @@ def main(argv=None):
         max_samples=cfg["data"].get("max_train_samples"),
     )
     model = build_poanet(cfg, num_classes=train_ds.num_classes).to(device)
+    pretrain_odn(model, train_ds, cfg, device)
     opt = torch.optim.SGD(
-        model.parameters(),
+        model.pafe.parameters(),
         lr=float(cfg["train"]["lr"]),
         momentum=float(cfg["train"].get("momentum", 0.9)),
         weight_decay=float(cfg["train"].get("weight_decay", 5e-4)),
@@ -159,7 +199,6 @@ def main(argv=None):
     phase1 = int(cfg["train"].get("phase1_epochs", 75))  # GE-focused
     eval_every = args.eval_every or int(cfg["eval"].get("every", 20))
     max_steps = cfg["train"].get("max_steps")
-    use_synth_occ = bool(cfg["train"].get("synthetic_occlusion", True))
 
     history = []
     best = {"mAP": -1.0}
@@ -179,9 +218,6 @@ def main(argv=None):
         for batch_data in loader:
             x = batch_data["image"].to(device, non_blocking=True)
             y = batch_data["label"].to(device, non_blocking=True)
-            occ_gt = None
-            if use_synth_occ and use_odn:
-                x, occ_gt = synthetic_occlusion_batch(x)
             opt.zero_grad(set_to_none=True)
             with amp.autocast(enabled=device.type == "cuda"):
                 out = model(x, use_odn=use_odn)
@@ -190,9 +226,7 @@ def main(argv=None):
                     y,
                     ce,
                     triplet,
-                    occ_gt=occ_gt,
                     lambda_tri=float(cfg["train"].get("lambda_tri", 1.0)),
-                    lambda_occ=float(cfg["train"].get("lambda_occ", 0.5)),
                 )
                 loss = losses["loss"]
             if not torch.isfinite(loss):

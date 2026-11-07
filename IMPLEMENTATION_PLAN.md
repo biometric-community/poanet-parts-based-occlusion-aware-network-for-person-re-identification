@@ -7,7 +7,7 @@ DOI: [10.1109/TBIOM.2025.3641048](https://doi.org/10.1109/TBIOM.2025.3641048)
 
 | Module | Paper | Ours |
 |--------|-------|------|
-| ODN | ResNet-based occlusion map on SHHQ-occ | ResNet-18 encoder–decoder; synthetic rect masks on Market |
+| ODN | ResNet-50 part occlusion extents on SHHQ-occ, then fixed | Same network and L1 loss on synthetic masks, then fixed |
 | OAM | Down-weight occluded regions | Per-stripe visibility × part/global embeddings |
 | PAFE | Head / torso / legs + global | Horizontal 3-stripe pooling on ResNet-50 fmap + global |
 | Loss | Triplet (+ ID) | Softmax CE + batch-hard triplet + BCE on occ map |

@@ -12,7 +12,13 @@ from PIL import Image
 from poanet.data.market1501 import Market1501, parse_market_name
 from poanet.losses import BatchHardTriplet
 from poanet.metrics import evaluate_rank
-from poanet.models.poanet import OcclusionDetector, PartAwareFeatureExtractor, synthetic_occlusion_batch
+from poanet.models.poanet import (
+    OcclusionDetector,
+    PartAwareFeatureExtractor,
+    POANet,
+    stripe_extents,
+    synthetic_occlusion_batch,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,7 +38,7 @@ def occlusion(rows: slice) -> torch.Tensor:
 def part_norms(pafe, occ) -> list[float]:
     torch.manual_seed(1)
     with torch.no_grad():
-        out = pafe(torch.rand(1, 3, 96, 32), occ_map=occ)
+        out = pafe(torch.rand(1, 3, 96, 32), occ_extents=None if occ is None else stripe_extents(occ))
     return [p.norm().item() for p in out["parts"]]
 
 
@@ -61,9 +67,39 @@ def test_synthetic_mask_marks_exactly_the_changed_pixels():
 
 def test_odn_predicts_one_occlusion_extent_per_body_part():
     """Eq. (4): the ODN outputs three values, for head, torso and legs."""
+    odn = OcclusionDetector(pretrained=False, input_size=(96, 32)).eval()
     with torch.no_grad():
-        out = OcclusionDetector(pretrained=False).eval()(torch.rand(2, 3, 96, 32))
+        out = odn(torch.rand(2, 3, 96, 32))
     assert out.shape == (2, 3)
+    assert ((out >= 0) & (out <= 1)).all()
+
+
+def test_ground_truth_extents_are_the_occluded_fraction_of_each_part():
+    assert stripe_extents(occlusion(slice(0, 16))).tolist() == [[0.5, 0.0, 0.0]]
+
+
+def test_odn_stays_fixed_during_reid_training():
+    """Sec. V-B: the ODN is trained separately and kept fixed."""
+    model = POANet(4, pretrained=False, feat_dim=16, input_size=(96, 32))
+    model.freeze_odn()
+    model.train()
+    before = {k: v.clone() for k, v in model.odn.state_dict().items()}
+    model(torch.rand(4, 3, 96, 32))
+    assert not model.odn.training
+    assert not any(p.requires_grad for p in model.odn.parameters())
+    assert all(torch.equal(v, before[k]) for k, v in model.odn.state_dict().items())
+
+
+def test_fusion_uses_the_occlusion_features():
+    """Eqs. (7)-(8): the 1x1 convolution sees both backbones and starts from the ReID features."""
+    torch.manual_seed(3)
+    pafe = PartAwareFeatureExtractor(num_classes=4, pretrained=False, feat_dim=16).eval()
+    x = torch.rand(2, 3, 96, 32)
+    occ = torch.rand(2, 1024, 6, 2)
+    with torch.no_grad():
+        assert torch.allclose(pafe(x)["global"], pafe(x, occ_features=occ)["global"], atol=1e-5)
+        pafe.fuse.weight[:, 1024:] = 0.01
+        assert not torch.allclose(pafe(x)["global"], pafe(x, occ_features=occ)["global"], atol=1e-5)
 
 
 @pytest.mark.parametrize("key", ["batch_size", "num_instances"])

@@ -39,20 +39,14 @@ def poanet_loss(
     labels: torch.Tensor,
     ce: nn.Module,
     triplet: BatchHardTriplet,
-    occ_gt: torch.Tensor | None = None,
     lambda_tri: float = 1.0,
-    lambda_occ: float = 0.5,
 ) -> Dict[str, torch.Tensor]:
     l_ce = ce(outputs["logits"], labels)
     l_tri = triplet(outputs["feat"], labels)
     loss = l_ce + lambda_tri * l_tri
-    l_occ = outputs["feat"].new_zeros(())
-    if occ_gt is not None and outputs.get("occ_map") is not None:
-        pred = outputs["occ_map"]
-        if pred.shape[-2:] != occ_gt.shape[-2:]:
-            pred = F.interpolate(pred, size=occ_gt.shape[-2:], mode="bilinear", align_corners=False)
-        # BCE unsafe under autocast — force fp32 context
-        with torch.amp.autocast("cuda", enabled=False):
-            l_occ = F.binary_cross_entropy(pred.float(), occ_gt.float())
-        loss = loss + lambda_occ * l_occ
-    return {"loss": loss, "ce": l_ce.detach(), "tri": l_tri.detach(), "occ": l_occ.detach()}
+    return {"loss": loss, "ce": l_ce.detach(), "tri": l_tri.detach()}
+
+
+def occlusion_extent_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Eq. (5): mean absolute error over the three body-part extents."""
+    return F.l1_loss(pred, target)

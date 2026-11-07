@@ -30,8 +30,12 @@ train:
   weight_decay: 0.0005
   margin: 0.3
   lambda_tri: 1.0
-  lambda_occ: 0.5
-  synthetic_occlusion: true
+  odn_pretrain:
+    epochs: 1
+    batch_size: 8
+    lr: 0.0001
+    weight_decay: 0.0005
+    max_steps: 10
   max_steps: 40
   seed: 42
 eval:

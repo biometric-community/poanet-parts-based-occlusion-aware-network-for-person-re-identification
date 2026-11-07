@@ -11,36 +11,36 @@ from torchvision import models
 
 
 class OcclusionDetector(nn.Module):
-    """Lightweight ODN: ResNet stem + decoder → occlusion probability map.
+    """ODN, Eqs. (2)-(4): ResNet-50 to the third residual block, then one extent per body part.
 
     Paper trains ODN on SHHQ-occ; we use synthetic rect masks (see DEVIATIONS.md).
     """
 
-    def __init__(self, pretrained: bool = True):
+    def __init__(self, pretrained: bool = True, input_size: tuple[int, int] = (384, 128)):
         super().__init__()
         weights = "DEFAULT" if pretrained else None
-        bb = models.resnet18(weights=weights)
-        self.encoder = nn.Sequential(
-            bb.conv1,
-            bb.bn1,
-            bb.relu,
-            bb.maxpool,
-            bb.layer1,
-            bb.layer2,
-            bb.layer3,
-        )
-        self.decoder = nn.Sequential(
-            nn.Conv2d(256, 64, 3, padding=1),
+        net = models.resnet50(weights=weights)
+        self.backbone = nn.Sequential(*list(net.children())[:-3])  # (B,1024,H/16,W/16)
+        self.conv = nn.Conv2d(1024, 2048, 3, padding=1)
+        self.pool = nn.MaxPool2d(2)
+        pooled = (input_size[0] // 32) * (input_size[1] // 32)
+        self.regressor = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(2048 * pooled, 1024),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 1, 1),
+            nn.Linear(1024, 3),
             nn.Sigmoid(),
         )
 
+    def features(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x)
+
+    def regress(self, features: torch.Tensor) -> torch.Tensor:
+        return self.regressor(self.pool(self.conv(features)))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # (B,1,H',W') occlusion probability in [0,1]
-        h = self.encoder(x)
-        m = self.decoder(h)
-        return F.interpolate(m, size=x.shape[-2:], mode="bilinear", align_corners=False)
+        # (B,3) occlusion extents for head, torso and legs, each in [0,1]
+        return self.regress(self.features(x))
 
 
 class PartAwareFeatureExtractor(nn.Module):
@@ -50,7 +50,13 @@ class PartAwareFeatureExtractor(nn.Module):
         super().__init__()
         weights = "DEFAULT" if pretrained else None
         net = models.resnet50(weights=weights)
-        self.backbone = nn.Sequential(*list(net.children())[:-2])  # (B,2048,H,W)
+        self.backbone = nn.Sequential(*list(net.children())[:-3])  # (B,1024,H,W)
+        self.layer4 = net.layer4
+        # Eqs. (7)-(8), starting from the identity on the ReID features
+        self.fuse = nn.Conv2d(2048, 1024, 1, bias=False)
+        with torch.no_grad():
+            self.fuse.weight.zero_()
+            self.fuse.weight[:, :1024, 0, 0] = torch.eye(1024)
         self.feat_dim = int(feat_dim)
         in_dim = 2048
         self.global_fc = nn.Linear(in_dim, self.feat_dim, bias=False)
@@ -77,26 +83,21 @@ class PartAwareFeatureExtractor(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        occ_map: Optional[torch.Tensor] = None,
+        occ_features: Optional[torch.Tensor] = None,
+        occ_extents: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         fmap = self.backbone(x)
-        g, parts = self._pool_parts(fmap)
+        if occ_features is not None:
+            fmap = self.fuse(torch.cat([fmap, occ_features], dim=1))
+        g, parts = self._pool_parts(self.layer4(fmap))
         g = self.global_fc(g)
         p_emb = [fc(p) for fc, p in zip(self.part_fcs, parts)]
 
-        # OAM: down-weight parts by mean occlusion in corresponding stripe
-        if occ_map is not None:
-            b, _, oh, ow = occ_map.shape
-            h3 = oh // 3
-            weights = []
-            for i in range(3):
-                stripe = occ_map[:, :, i * h3 : (i + 1) * h3 if i < 2 else oh, :]
-                # visibility = 1 - mean occlusion
-                vis = (1.0 - stripe.mean(dim=(1, 2, 3))).clamp(0.05, 1.0)
-                weights.append(vis.unsqueeze(1))
-            p_emb = [p * w for p, w in zip(p_emb, weights)]
-            g_vis = (1.0 - occ_map.mean(dim=(1, 2, 3))).clamp(0.05, 1.0).unsqueeze(1)
-            g = g * g_vis
+        # Down-weight each part by its predicted occlusion extent
+        if occ_extents is not None:
+            vis = (1.0 - occ_extents).clamp(0.05, 1.0)
+            p_emb = [p * vis[:, i : i + 1] for i, p in enumerate(p_emb)]
+            g = g * (1.0 - occ_extents.mean(dim=1, keepdim=True)).clamp(0.05, 1.0)
 
         feat = torch.cat([g, *p_emb], dim=1)
         feat = self.bn(feat)
@@ -112,25 +113,57 @@ class PartAwareFeatureExtractor(nn.Module):
 
 
 class POANet(nn.Module):
-    def __init__(self, num_classes: int, pretrained: bool = True, feat_dim: int = 256):
+    def __init__(
+        self,
+        num_classes: int,
+        pretrained: bool = True,
+        feat_dim: int = 256,
+        input_size: tuple[int, int] = (384, 128),
+    ):
         super().__init__()
-        self.odn = OcclusionDetector(pretrained=pretrained)
+        self.odn = OcclusionDetector(pretrained=pretrained, input_size=input_size)
         self.pafe = PartAwareFeatureExtractor(num_classes, pretrained=pretrained, feat_dim=feat_dim)
+        self.odn_frozen = False
+
+    def freeze_odn(self) -> None:
+        """Sec. V-B: the ODN is trained separately and kept fixed during ReID training."""
+        self.odn_frozen = True
+        self.odn.requires_grad_(False)
+        self.odn.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.odn_frozen:
+            self.odn.eval()
+        return self
 
     def forward(self, x: torch.Tensor, use_odn: bool = True) -> Dict[str, torch.Tensor]:
-        occ = self.odn(x) if use_odn else None
-        out = self.pafe(x, occ_map=occ)
-        out["occ_map"] = occ
+        if not use_odn:
+            return self.pafe(x)
+        with torch.no_grad():
+            features = self.odn.features(x)
+            extents = self.odn.regress(features)
+        out = self.pafe(x, occ_features=features, occ_extents=extents)
+        out["occ_extents"] = extents
         return out
 
 
 def build_poanet(cfg: dict, num_classes: int) -> POANet:
     mcfg = cfg.get("model", {})
+    dcfg = cfg.get("data", {})
     return POANet(
         num_classes=num_classes,
         pretrained=bool(mcfg.get("pretrained", True)),
         feat_dim=int(mcfg.get("feat_dim", 256)),
+        input_size=(int(dcfg.get("height", 384)), int(dcfg.get("width", 128))),
     )
+
+
+def stripe_extents(mask: torch.Tensor) -> torch.Tensor:
+    """Occluded fraction of the head, torso and leg stripes of a (B,1,H,W) mask."""
+    h3 = mask.shape[2] // 3
+    stripes = [mask[:, :, i * h3 : (i + 1) * h3 if i < 2 else mask.shape[2], :] for i in range(3)]
+    return torch.stack([s.mean(dim=(1, 2, 3)) for s in stripes], dim=1)
 
 
 def synthetic_occlusion_batch(
