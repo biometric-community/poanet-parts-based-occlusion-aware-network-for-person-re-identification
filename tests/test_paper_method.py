@@ -1,4 +1,4 @@
-"""ODN and PAFE behaviour and the evaluation protocol, checked against the abstract."""
+"""ODN and PAFE behaviour and the evaluation protocol, checked against the paper."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from PIL import Image
 from poanet.data.market1501 import Market1501, parse_market_name
 from poanet.losses import BatchHardTriplet
 from poanet.metrics import evaluate_rank
-from poanet.models.poanet import PartAwareFeatureExtractor, synthetic_occlusion_batch
+from poanet.models.poanet import OcclusionDetector, PartAwareFeatureExtractor, synthetic_occlusion_batch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,6 +57,18 @@ def test_synthetic_mask_marks_exactly_the_changed_pixels():
     assert mask.sum() > 0
     changed = (occluded != images).any(dim=1, keepdim=True).float()
     assert torch.equal(changed, mask)
+
+
+def test_odn_predicts_one_occlusion_extent_per_body_part():
+    """Eq. (4): the ODN outputs three values, for head, torso and legs."""
+    with torch.no_grad():
+        out = OcclusionDetector(pretrained=False).eval()(torch.rand(2, 3, 96, 32))
+    assert out.shape == (2, 3)
+
+
+@pytest.mark.parametrize("key", ["batch_size", "num_instances"])
+def test_batch_composition_matches_the_paper(default_cfg, targets, key):
+    assert default_cfg["train"][key] == targets["training"][key]
 
 
 def test_batch_hard_triplet_is_zero_when_identities_are_separated():

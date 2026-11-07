@@ -2,7 +2,10 @@
 # Re-Identification", IEEE TBIOM 2026, doi:10.1109/TBIOM.2025.3641048.
 source: doi:10.1109/TBIOM.2025.3641048
 
-# Fill in from the paper's tables to enable test_published_values. The paper is closed
-# access and only its abstract was available, so no values are recorded here.
-# Shape: {map: 0.0, rank1: 0.0} for Market-1501.
-published_values: null
+# Table V, POANet+ODN without re-ranking, Market-1501.
+published_values: {map: 86.9, rank1: 95.3}
+
+# Sec. V-B: P = 16 identities with K = 8 images per batch.
+training:
+  batch_size: 128
+  num_instances: 8
